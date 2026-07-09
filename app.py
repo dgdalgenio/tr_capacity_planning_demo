@@ -359,6 +359,7 @@ with tab1:
     if n_known == 0:
         st.info("No actuals entered yet — analysis will populate once at least one interval has actuals.")
     else:
+        known_idx = fc_df.index[known_mask]
         fc_known = fc_df.loc[known_mask]
         ac_known = ac_df.loc[known_mask]
 
