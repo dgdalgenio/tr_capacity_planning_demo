@@ -445,7 +445,7 @@ with tab1:
                                   line=dict(color=colors[col], dash="dash", width=2), mode="lines+markers",
                                   marker=dict(size=4)))
     fig.update_layout(
-        title="Actual vs. Forecasted vs. Reforecasted Call Volume by Tier",
+        # title="Actual vs. Forecasted vs. Reforecasted Call Volume by Tier",
         xaxis_title="Time Interval", yaxis_title="Call Volume",
         height=480, legend=dict(orientation="h", yanchor="bottom", y=1.02),
         margin=dict(t=60),
