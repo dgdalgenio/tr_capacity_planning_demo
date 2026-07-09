@@ -347,6 +347,8 @@ with tab1:
             + " · ".join(f"**{t}** → {diag['best_model'][t]} (err={diag['error'][t]})" for t in TIERS)
         )
 
+    colors = {"Tier 1": "#2563eb", "Tier 2": "#f59e0b", "Tier 3": "#16a34a"}
+
     st.markdown("---")
     st.markdown("### 🔎 Forecast Model Analysis — current model accuracy")
     st.caption(
@@ -432,7 +434,6 @@ with tab1:
         reforecast_col.loc[reforecast_df.index] = reforecast_df[col].values
         plot_df[f"{col} Reforecast"] = reforecast_col
 
-    colors = {"Tier 1": "#2563eb", "Tier 2": "#f59e0b", "Tier 3": "#16a34a"}
     fig = go.Figure()
     for col in TIERS:
         fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[f"{col} Forecast"], name=f"{col} Forecast",
