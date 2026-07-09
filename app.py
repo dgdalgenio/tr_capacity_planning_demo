@@ -278,32 +278,47 @@ tab1, tab2, tab3 = st.tabs(
 with tab1:
     st.subheader("Call volume: forecast vs. actual")
     st.markdown(
-        "Edit the table below directly (double-click a cell) or **paste** values in from Excel. "
-        "Leave *Actual* cells blank for intervals that haven't happened yet — the app will "
-        "generate a **reforecast** for those rows automatically."
+        "Edit the table below directly (double-click a cell, then press **Tab/Enter** to commit) "
+        "or **paste** values in from Excel. Leave *Actual* cells blank for intervals that haven't "
+        "happened yet — the app regenerates the **reforecast** for those rows the moment you commit "
+        "an edit. *Total* columns are auto-computed from the tier columns, so you never need to "
+        "edit them by hand."
     )
 
     if "fc_ac_editor" not in st.session_state:
         st.session_state["fc_ac_editor"] = load_default_forecast_actual()
 
-    edited = st.data_editor(
+    edited_raw = st.data_editor(
         st.session_state["fc_ac_editor"],
         num_rows="fixed",
         use_container_width=True,
         height=420,
         column_config={
             "Time": st.column_config.TextColumn("Time Interval", disabled=True),
-            "Fc_Total": st.column_config.NumberColumn("Forecast Total"),
+            "Fc_Total": st.column_config.NumberColumn("Forecast Total (auto)", disabled=True),
             "Fc_T1": st.column_config.NumberColumn("Forecast T1"),
             "Fc_T2": st.column_config.NumberColumn("Forecast T2"),
             "Fc_T3": st.column_config.NumberColumn("Forecast T3"),
-            "Ac_Total": st.column_config.NumberColumn("Actual Total"),
+            "Ac_Total": st.column_config.NumberColumn("Actual Total (auto)", disabled=True),
             "Ac_T1": st.column_config.NumberColumn("Actual T1"),
             "Ac_T2": st.column_config.NumberColumn("Actual T2"),
             "Ac_T3": st.column_config.NumberColumn("Actual T3"),
         },
         key="fc_ac_data_editor",
     )
+
+    # Auto-sync the Total columns from whatever tier values were just edited, so the table
+    # (and every downstream calculation) always reflects the latest inputs.
+    edited = edited_raw.copy()
+    edited["Fc_Total"] = edited[["Fc_T1", "Fc_T2", "Fc_T3"]].sum(axis=1, min_count=1)
+    edited["Ac_Total"] = edited[["Ac_T1", "Ac_T2", "Ac_T3"]].sum(axis=1, min_count=1)
+
+    # Detect whether this rerun was triggered by an actual edit to the volume table, so we can
+    # surface a clear confirmation that the reforecast just updated.
+    prev_signature = st.session_state.get("fc_ac_signature")
+    new_signature = pd.util.hash_pandas_object(edited.fillna(-1)).sum()
+    volume_changed = prev_signature is not None and prev_signature != new_signature
+    st.session_state["fc_ac_signature"] = new_signature
     st.session_state["fc_ac_editor"] = edited
 
     fc_df = edited.set_index("Time")[["Fc_T1", "Fc_T2", "Fc_T3"]].rename(
@@ -314,6 +329,9 @@ with tab1:
     )
 
     reforecast_df, diag = generate_reforecast(fc_df, ac_df, TIERS, decay_rate)
+
+    if volume_changed:
+        st.toast("Reforecast updated from your latest edits ✅", icon="🔄")
 
     known_mask = ac_df.notna().all(axis=1) & (ac_df.abs().sum(axis=1) > 0)
     n_known, n_future = known_mask.sum(), (~known_mask).sum()
@@ -328,6 +346,81 @@ with tab1:
             "Best-fit drift model per tier (lowest backtest error): "
             + " · ".join(f"**{t}** → {diag['best_model'][t]} (err={diag['error'][t]})" for t in TIERS)
         )
+
+    st.markdown("---")
+    st.markdown("### 🔎 Forecast Model Analysis — current model accuracy")
+    st.caption(
+        "How well is today's original forecast tracking reality so far? This section only looks at "
+        "intervals where actuals have already landed (no reforecast)."
+    )
+
+    if n_known == 0:
+        st.info("No actuals entered yet — analysis will populate once at least one interval has actuals.")
+    else:
+        fc_known = fc_df.loc[known_mask]
+        ac_known = ac_df.loc[known_mask]
+
+        # --- Actual vs Forecasted Tiers (known intervals only, no reforecast) ---
+        fig_av = go.Figure()
+        for col in TIERS:
+            fig_av.add_trace(go.Scatter(x=fc_df.index, y=fc_df[col], name=f"{col} Forecast",
+                                         line=dict(color=colors[col], dash="dot", width=2)))
+            fig_av.add_trace(go.Scatter(x=ac_known.index, y=ac_known[col], name=f"{col} Actual",
+                                         line=dict(color=colors[col], width=3)))
+        fig_av.update_layout(
+            title="Actual vs. Forecasted Tiers", xaxis_title="Time Interval", yaxis_title="Call Volume",
+            height=440, legend=dict(orientation="h", yanchor="bottom", y=1.02), margin=dict(t=60),
+        )
+        st.plotly_chart(fig_av, use_container_width=True)
+
+        # --- Forecast variance summary (per-interval diff & pct, known intervals) ---
+        st.markdown("**Forecast variance summary** — per-interval difference between actual and forecast")
+        variance_rows = pd.DataFrame(index=known_idx)
+        all_cols = TIERS + ["Total"]
+        fc_known_full = fc_known.copy()
+        ac_known_full = ac_known.copy()
+        fc_known_full["Total"] = fc_known[TIERS].sum(axis=1)
+        ac_known_full["Total"] = ac_known[TIERS].sum(axis=1)
+        for col in all_cols:
+            diff = ac_known_full[col] - fc_known_full[col]
+            pct = (diff / fc_known_full[col].replace(0, np.nan) * 100).round(1)
+            variance_rows[f"{col} Diff"] = diff
+            variance_rows[f"{col} Pct Var"] = pct
+        st.dataframe(variance_rows, use_container_width=True)
+
+        # --- Cumulative variance summary (per tier + Total) ---
+        st.markdown("**Cumulative variance summary** — running totals for the intervals observed so far")
+        rows = []
+        for col in all_cols:
+            fc_sum = fc_known_full[col].sum()
+            ac_sum = ac_known_full[col].sum()
+            diff = ac_sum - fc_sum
+            pct = (diff / fc_sum * 100) if fc_sum else np.nan
+            rows.append([col, fc_sum, ac_sum, diff, round(pct, 1)])
+        summary_df = pd.DataFrame(rows, columns=["Segment", "Forecast Total", "Actual Total", "Diff", "Pct Variance"])
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+        # --- Difference of Actual to Forecasted values (diff over time) ---
+        fig_diff = go.Figure()
+        fig_diff.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.6)
+        diff_colors = {"Tier 1": colors["Tier 1"], "Tier 2": colors["Tier 2"], "Tier 3": colors["Tier 3"], "Total": "#6b21a8"}
+        for col in all_cols:
+            diff_series = ac_known_full[col] - fc_known_full[col]
+            fig_diff.add_trace(go.Scatter(x=known_idx, y=diff_series, name=f"{col} Diff",
+                                           line=dict(color=diff_colors[col], width=2)))
+        fig_diff.update_layout(
+            title="Difference of Actual to Forecasted Values", xaxis_title="Time Interval",
+            yaxis_title="Actual − Forecast", height=420,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02), margin=dict(t=60),
+        )
+        st.plotly_chart(fig_diff, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("### 🔮 Reforecast — remaining intervals")
+    st.caption(
+        "Projects the drift between actual and forecast forward for the intervals still ahead, using "
+        "whichever model (Linear, Ridge, Holt, or ARIMA) best matched the most recent known drift per tier."
+    )
 
     # Build combined series for plotting: actual where known, reforecast where future
     plot_df = pd.DataFrame(index=fc_df.index)
@@ -361,20 +454,6 @@ with tab1:
         rf_display = reforecast_df.copy()
         rf_display["Total"] = rf_display[TIERS].sum(axis=1)
         st.dataframe(rf_display, use_container_width=True)
-
-    with st.expander("📊 Cumulative variance summary (known intervals)"):
-        if n_known > 0:
-            rows = []
-            for col in TIERS:
-                fc_sum = fc_df.loc[known_mask, col].sum()
-                ac_sum = ac_df.loc[known_mask, col].sum()
-                diff = ac_sum - fc_sum
-                pct = (diff / fc_sum * 100) if fc_sum else np.nan
-                rows.append([col, fc_sum, ac_sum, diff, round(pct, 1)])
-            summary_df = pd.DataFrame(rows, columns=["Segment", "Forecast Total", "Actual Total", "Diff", "Pct Variance"])
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No actuals entered yet.")
 
     # Combined "final" call volume table used downstream: actuals where known, reforecast where future
     final_volume = pd.DataFrame(index=fc_df.index, columns=TIERS, dtype=float)
